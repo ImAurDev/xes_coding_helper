@@ -43,63 +43,141 @@ function toBase64(str: string): string {
     return btoa(binary);
 }
 
+interface PythonProcess {
+    command: Deno.ChildProcess;
+    stdin: WritableStreamDefaultWriter<Uint8Array>;
+    stdoutReader: ReadableStreamDefaultReader<Uint8Array>;
+    stderrReader: ReadableStreamDefaultReader<Uint8Array>;
+    cleanup: () => Promise<void>;
+    socket: WebSocket;
+    processId: string;
+    isFinished: boolean;
+    inputBuffer: string;
+}
+
+const activeProcesses = new Map<string, PythonProcess>();
+
+function generateProcessId(): string {
+    return Math.random().toString(36).substring(2) + Date.now().toString(36);
+}
+
 async function runPythonCode(
     code: string,
-): Promise<{ output: string; error: boolean }> {
+    processId: string,
+    socket: WebSocket
+): Promise<void> {
     try {
         if (!code || code.trim() === "") {
-            return { output: "代码不能为空！", error: true };
+            const errorMsg = "代码不能为空！";
+            const errorBase64 = toBase64(errorMsg);
+            socket.send("1" + errorBase64);
+            return;
         }
 
         const tempDir = await Deno.makeTempDir();
         const tempFile = `${tempDir}/temp_code.py`;
-
+        
         await Deno.writeTextFile(tempFile, code);
 
         const command = new Deno.Command("python3", {
-            args: [tempFile],
+            args: ["-u", tempFile],
+            stdin: "piped",
             stdout: "piped",
             stderr: "piped",
         });
 
-        const { code: exitCode, stdout, stderr } = await command.output();
-        const rawOutput = new TextDecoder().decode(stdout);
-        const rawError = new TextDecoder().decode(stderr);
-
-        await Deno.remove(tempFile);
-        await Deno.remove(tempDir);
-
-        if (exitCode !== 0) {
-            const lines = rawError.split("\n");
-            let mainError = "";
-            for (const line of lines) {
-                if (
-                    line.trim().startsWith("File") ||
-                    line.includes("SyntaxError") ||
-                    line.includes("NameError") ||
-                    line.includes("TypeError") ||
-                    line.includes("ValueError") ||
-                    line.includes("IndentationError") ||
-                    line.includes("AttributeError")
-                ) {
-                    mainError = line.trim();
-                    break;
+        const childProcess = command.spawn();
+        
+        const stdinWriter = childProcess.stdin.getWriter();
+        const stdoutReader = childProcess.stdout.getReader();
+        const stderrReader = childProcess.stderr.getReader();
+        
+        const cleanup = async () => {
+            try {
+                stdinWriter.releaseLock();
+                stdoutReader.releaseLock();
+                stderrReader.releaseLock();
+                
+                try {
+                    childProcess.kill("SIGTERM");
+                } catch (_e) {}
+                
+                try {
+                    await Deno.remove(tempFile);
+                    await Deno.remove(tempDir);
+                } catch (_e) {}
+                
+                const process = activeProcesses.get(processId);
+                if (process) {
+                    process.isFinished = true;
                 }
-            }
-
-            if (!mainError) {
-                mainError = rawError.trim().split("\n").slice(-2).join(" ") ||
-                    rawError.trim();
-            }
-
-            const errorInfo = code + "\a\n" + mainError;
-            return { output: errorInfo, error: true };
-        }
-
-        return { output: rawOutput.trim(), error: false };
+                activeProcesses.delete(processId);
+            } catch (e) {}
+        };
+        
+        const processInfo: PythonProcess = {
+            command: childProcess,
+            stdin: stdinWriter,
+            stdoutReader,
+            stderrReader,
+            cleanup,
+            socket,
+            processId,
+            isFinished: false,
+            inputBuffer: ""
+        };
+        
+        activeProcesses.set(processId, processInfo);
+        
+        const readOutput = async () => {
+            try {
+                while (true) {
+                    const { done, value } = await stdoutReader.read();
+                    if (done) break;
+                    
+                    const output = new TextDecoder().decode(value);
+                    if (output) {
+                        const outputBase64 = toBase64(output);
+                        socket.send("1" + outputBase64);
+                    }
+                }
+            } catch (e) {}
+        };
+        
+        const readError = async () => {
+            try {
+                while (true) {
+                    const { done, value } = await stderrReader.read();
+                    if (done) break;
+                    
+                    const error = new TextDecoder().decode(value);
+                    if (error) {
+                        const errorBase64 = toBase64(error);
+                        socket.send("1" + errorBase64);
+                    }
+                }
+            } catch (e) {}
+        };
+        
+        childProcess.status.then(async (status) => {
+            await cleanup();
+            socket.send("7eyJUeXBlIjogInJ1bkluZm8iLCAiSW5mbyI6ICJcclxuXHJcblx1NGVlM1x1NzgwMVx1OGZkMFx1ODg0Y1x1N2VkM1x1Njc1ZiJ9");
+            socket.send("7eyJUeXBlIjogInNpZ25hbCIsICJJbmZvIjogIntcIm5ld1wiOiBbXSwgXCJkZWxcIjogW10sIFwibW9kXCI6IFtdLCBcImRpcl9kZWxcIjogW10sIFwiZGlyX25ld1wiOiBbXSwgXCJ0eXBlXCI6IFwiY2hhbmdlZFwifSJ9");
+        }).catch(async (error) => {
+            await cleanup();
+            socket.send("7eyJUeXBlIjogInJ1bkluZm8iLCAiSW5mbyI6ICJcclxuXHJcblx1NGVlM1x1NzgwMVx1OGZkMFx1ODg0Y1x1N2VkM1x1Njc1ZiJ9");
+            socket.send("7eyJUeXBlIjogInNpZ25hbCIsICJJbmZvIjogIntcIm5ld1wiOiBbXSwgXCJkZWxcIjogW10sIFwibW9kXCI6IFtdLCBcImRpcl9kZWxcIjogW10sIFwiZGlyX25ld1wiOiBbXSwgXCJ0eXBlXCI6IFwiY2hhbmdlZFwifSJ9");
+        });
+        
+        readOutput();
+        readError();
+        
     } catch (error) {
-        const errorInfo = code + "\a\n" + error.message;
-        return { output: errorInfo, error: true };
+        const errorMsg = `启动错误: ${error.message}`;
+        const errorBase64 = toBase64(errorMsg);
+        socket.send("1" + errorBase64);
+        socket.send("7eyJUeXBlIjogInJ1bkluZm8iLCAiSW5mbyI6ICJcclxuXHJcblx1NGVlM1x1NzgwMVx1OGZkMFx1ODg0Y1x1N2VkM1x1Njc1ZiJ9");
+        socket.send("7eyJUeXBlIjogInNpZ25hbCIsICJJbmZvIjogIntcIm5ld1wiOiBbXSwgXCJkZWxcIjogW10sIFwibW9kXCI6IFtdLCBcImRpcl9kZWxcIjogW10sIFwiZGlyX25ld1wiOiBbXSwgXCJ0eXBlXCI6IFwiY2hhbmdlZFwifSJ9");
     }
 }
 
@@ -125,80 +203,105 @@ function createWebSocketHandler() {
         if (req.headers.get("upgrade") === "websocket") {
             const { socket, response } = Deno.upgradeWebSocket(req);
 
-            socket.onopen = () => Debug("Websocket 客户端连接");
+            let currentProcessId: string | null = null;
+
+            socket.onopen = () => {
+                Debug("Websocket 客户端连接");
+            };
 
             socket.onmessage = async (e) => {
                 try {
-                    Info(`接收到信息: ${e.data}`);
-
                     const dataStr = e.data.toString();
+                    
+                    if (dataStr.startsWith("1")) {
+                        const inputData = dataStr.substring(1);
+                        
+                        if (currentProcessId) {
+                            const process = activeProcesses.get(currentProcessId);
+                            if (process && !process.isFinished) {
+                                process.inputBuffer += inputData;
+                            }
+                        }
+                        return;
+                    }
+                    
                     if (dataStr.startsWith("7")) {
                         try {
                             const jsonStr = dataStr.substring(1);
                             const data = JSON.parse(jsonStr);
+                            
+                            if (data.type === "conn" && data.handle === "close") {
+                                if (currentProcessId) {
+                                    const process = activeProcesses.get(currentProcessId);
+                                    if (process) {
+                                        await process.cleanup();
+                                        socket.send("7eyJUeXBlIjogInJ1bkluZm8iLCAiSW5mbyI6ICJcclxuXHJcblx1NGVlM1x1NzgwMVx1OGZkMFx1ODg0Y1x1N2VkM1x1Njc1ZiJ9");
+                                        socket.send("7eyJUeXBlIjogInNpZ25hbCIsICJJbmZvIjogIntcIm5ld1wiOiBbXSwgXCJkZWxcIjogW10sIFwibW9kXCI6IFtdLCBcImRpcl9kZWxcIjogW10sIFwiZGlyX25ld1wiOiBbXSwgXCJ0eXBlXCI6IFwiY2hhbmdlZFwifSJ9");
+                                    }
+                                }
+                                return;
+                            }
 
                             let pythonCode = "";
 
                             if (data.xml && data.xml.trim() !== "") {
-                                pythonCode = data.xml;
-                            } else if (
-                                data.tabsListData &&
-                                data.tabsListData.length > 0
-                            ) {
+                                pythonCode = String(data.xml);
+                            } else if (data.tabsListData && data.tabsListData.length > 0) {
                                 const mainFile = data.tabsListData.find((
                                     tab: any,
-                                ) => tab.name === "main.py" ||
-                                    tab.ext === "py"
-                                );
-                                if (
-                                    mainFile && mainFile.value &&
-                                    mainFile.value.trim() !== ""
-                                ) {
-                                    pythonCode = mainFile.value;
-                                } else if (
-                                    mainFile && mainFile.content &&
-                                    mainFile.content.trim() !== ""
-                                ) {
-                                    pythonCode = mainFile.content;
+                                ) => tab.name === "main.py" || tab.ext === "py");
+                                if (mainFile && mainFile.value && mainFile.value.trim() !== "") {
+                                    pythonCode = String(mainFile.value);
+                                } else if (mainFile && mainFile.content && mainFile.content.trim() !== "") {
+                                    pythonCode = String(mainFile.content);
                                 }
                             }
-
+                            
+                            pythonCode = pythonCode.trim().replace(/\\n/g, '\n');
+                            
                             if (!pythonCode || pythonCode.trim() === "") {
-                                socket.send(
-                                    "7eyJUeXBlIjogInJ1bkluZm8iLCAiSW5mbyI6ICLku6PnoIHkuI3og73kuLrnqbrvvIEifQ==",
-                                );
                                 return;
                             }
 
-                            const result = await runPythonCode(pythonCode);
+                            if (currentProcessId) {
+                                const oldProcess = activeProcesses.get(currentProcessId);
+                                if (oldProcess) {
+                                    try {
+                                        await oldProcess.cleanup();
+                                    } catch (e) {}
+                                }
+                            }
 
-                            const outputBase64 = toBase64(result.output);
-                            const message1 = "1" + outputBase64;
-                            socket.send(message1);
-                            socket.send(
-                                "7eyJUeXBlIjogInJ1bkluZm8iLCAiSW5mbyI6ICJcclxuXHJcblx1NGVlM1x1NzgwMVx1OGZkMFx1ODg0Y1x1N2VkM1x1Njc1ZiJ9",
-                            );
+                            currentProcessId = generateProcessId();
+                            
+                            socket.send("7eyJUeXBlIjogInJ1bkluZm8iLCAiSW5mbyI6ICJcclxuXHJcblx1NGVlM1x1NzgwMVx1OGZkMFx1ODg0Y1x1N2VkM1x1Njc1ZiJ9");
+
+                            runPythonCode(pythonCode, currentProcessId, socket);
+
                         } catch (parseError) {
-                            console.error("解析消息时出错:", parseError);
-                            const errorMsg = `解析错误: ${parseError.message}`;
-                            const errorBase64 = toBase64(errorMsg);
-                            socket.send("1" + errorBase64);
+                            socket.send("7eyJUeXBlIjogInJ1bkluZm8iLCAiSW5mbyI6ICJcclxuXHJcblx1NGVlM1x1NzgwMVx1OGZkMFx1ODg0Y1x1N2VkM1x1Njc1ZiJ9");
+                            socket.send("7eyJUeXBlIjogInNpZ25hbCIsICJJbmZvIjogIntcIm5ld1wiOiBbXSwgXCJkZWxcIjogW10sIFwibW9kXCI6IFtdLCBcImRpcl9kZWxcIjogW10sIFwiZGlyX25ld1wiOiBbXSwgXCJ0eXBlXCI6IFwiY2hhbmdlZFwifSJ9");
                         }
-                    } else {
-                        socket.send(e.data);
                     }
                 } catch (error) {
-                    console.error("处理消息时出错:", error);
-                    const errorMsg = `处理错误: ${error.message}`;
-                    const errorBase64 = toBase64(errorMsg);
-                    socket.send("1" + errorBase64);
+                    socket.send("7eyJUeXBlIjogInJ1bkluZm8iLCAiSW5mbyI6ICJcclxuXHJcblx1NGVlM1x1NzgwMVx1OGZkMFx1ODg0Y1x1N2VkM1x1Njc1ZiJ9");
+                    socket.send("7eyJUeXBlIjogInNpZ25hbCIsICJJbmZvIjogIntcIm5ld1wiOiBbXSwgXCJkZWxcIjogW10sIFwibW9kXCI6IFtdLCBcImRpcl9kZWxcIjogW10sIFwiZGlyX25ld1wiOiBbXSwgXCJ0eXBlXCI6IFwiY2hhbmdlZFwifSJ9");
                 }
             };
 
-            socket.onclose = () => Debug("Websocket 客户端断开");
-            socket.onerror = (error) => {
-                console.error("WebSocket错误:", error);
+            socket.onclose = async () => {
+                Debug("Websocket 客户端断开");
+                if (currentProcessId) {
+                    const process = activeProcesses.get(currentProcessId);
+                    if (process) {
+                        try {
+                            await process.cleanup();
+                        } catch (e) {}
+                    }
+                }
             };
+            
+            socket.onerror = (error) => {};
 
             return response;
         }

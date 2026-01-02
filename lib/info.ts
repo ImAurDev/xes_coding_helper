@@ -1,15 +1,15 @@
 export function Info(msg: string) {
-    console.info(`[INFO] ${msg}`);
+    console.info(`\n[INFO] ${msg}`);
 }
 
 export function Warn(msg: string) {
-    console.warn(`[WARN] ${msg}`);
+    console.warn(`\n[WARN] ${msg}`);
 }
 
 export function Error(msg: string) {
-    console.error(`[ERROR] ${msg}`);
+    console.error(`\n[ERROR] ${msg}`);
 }
 
 export function Debug(msg: string) {
-    console.log(`[DEBUG] ${msg}`);
+    console.log(`\n[DEBUG] ${msg}`);
 }
