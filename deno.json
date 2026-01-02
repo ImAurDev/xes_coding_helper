@@ -1,0 +1,12 @@
+{
+    "tasks": {
+        "dev": "deno run --watch --allow-all main.ts"
+    },
+    "imports": {
+        "@std/assert": "jsr:@std/assert@1",
+        "base64": "npm:base64@^2.1.0"
+    },
+    "fmt": {
+        "indentWidth": 4
+    }
+}
