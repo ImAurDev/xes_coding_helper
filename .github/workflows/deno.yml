@@ -1,0 +1,71 @@
+name: Deno
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  compile-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup repo
+        uses: actions/checkout@v4
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@61fe2df320078202e33d7d5ad347e7dcfa0e8f31  # v1.1.2
+        with:
+          deno-version: v1.x
+
+      - name: Compile main.ts for Linux
+        run: deno compile --allow-all --no-check --output main-linux main.ts
+
+      - name: Upload compiled binary for Linux
+        uses: actions/upload-artifact@v4
+        with:
+          name: main-linux
+          path: main-linux
+
+  compile-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Setup repo
+        uses: actions/checkout@v4
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@61fe2df320078202e33d7d5ad347e7dcfa0e8f31  # v1.1.2
+        with:
+          deno-version: v1.x
+
+      - name: Compile main.ts for Windows
+        run: deno compile --allow-all --no-check --output main-windows.exe main.ts
+
+      - name: Upload compiled binary for Windows
+        uses: actions/upload-artifact@v4
+        with:
+          name: main-windows.exe
+          path: main-windows.exe
+
+  compile-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Setup repo
+        uses: actions/checkout@v4
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@61fe2df320078202e33d7d5ad347e7dcfa0e8f31  # v1.1.2
+        with:
+          deno-version: v1.x
+
+      - name: Compile main.ts for macOS
+        run: deno compile --allow-all --no-check --output main-macos main.ts
+
+      - name: Upload compiled binary for macOS
+        uses: actions/upload-artifact@v4
+        with:
+          name: main-macos
+          path: main-macos
